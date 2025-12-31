@@ -15,12 +15,14 @@
       position: fixed; left: 16px; right: 16px; top: 16px;
       display:flex; justify-content:space-between; gap:12px;
       pointer-events:none;
+      z-index: 1000;
     }
     .panel {
       background: rgba(17,24,39,.85); color:#f9fafb;
       padding: 12px 14px; border-radius: 14px;
       backdrop-filter: blur(6px);
       max-width: 70vw;
+      pointer-events: auto;
     }
     .title { font-size: 30px; font-weight: 900; line-height: 1.05; }
     .muted { color:#d1d5db; font-size: 15px; margin-top: 6px; }
@@ -69,9 +71,9 @@
   }
 
   function renderPublic(round) {
-    clearReveal(); // host stays clean until reveal
-
     if (!round) {
+      // no round: clear any previous reveal visuals
+      clearReveal();
       elPrompt.textContent = "Waiting for round…";
       elSub.textContent = "Admin: /admin.html";
       elGuessCount.textContent = "0";
@@ -81,6 +83,19 @@
     elPrompt.textContent = round.prompt || "Where is it?";
     elSub.textContent = round.revealed ? "Revealed" : "Waiting for reveal…";
     elGuessCount.textContent = String(round.guessCount ?? 0);
+
+    // If the round is revealed and we received the actual+guesses (e.g. host
+    // connected after a reveal or server sent the full round), render the
+    // reveal visuals here. If the reveal message arrives separately it will
+    // also call `showReveal` so we just avoid clearing visuals on revealed
+    // state.
+    if (round.revealed) {
+      if (round.actual) showReveal(round);
+      return;
+    }
+
+    // not revealed: ensure the host stays clean (no pins)
+    clearReveal();
   }
 
   function showReveal(round) {

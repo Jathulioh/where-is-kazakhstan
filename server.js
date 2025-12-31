@@ -69,7 +69,9 @@ function broadcastClients(obj) {
 
 function emitAllState() {
   // Host display sees only public round state (no pins) until reveal message arrives.
-  safeSend(state.hostWs, { type: "round_state", round: publicRound() });
+  // If the round has already been revealed, send the full round to host so it
+  // can render the actual + pins (this also covers hosts that connect after a reveal).
+  safeSend(state.hostWs, { type: "round_state", round: state.round && state.round.revealed ? fullRound() : publicRound() });
 
   // Clients see public round state; reveal delivered separately.
   broadcastClients({ type: "round_state", round: publicRound() });
@@ -108,7 +110,9 @@ wss.on("connection", (ws) => {
       if (role === "host") {
         state.hostWs = ws;
         ws._role = "host";
-        safeSend(ws, { type: "round_state", round: publicRound() });
+        // If the round is already revealed, give the host the full round
+        // (actual + guesses) so it can render the reveal on connect.
+        safeSend(ws, { type: "round_state", round: state.round && state.round.revealed ? fullRound() : publicRound() });
         return;
       }
 
