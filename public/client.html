@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Player</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header {
+      padding: 10px 12px;
+      background:#111827; color:#f9fafb;
+      display:flex; gap:10px; align-items:center;
+    }
+    header input {
+      flex:1; padding: 8px 10px; border-radius: 10px;
+      border: 1px solid #374151; background:#0b1220; color:#f9fafb;
+    }
+    header button {
+      padding: 8px 12px; border-radius: 10px;
+      border: 1px solid #374151; background:#1f2937; color:#f9fafb;
+      cursor:pointer;
+    }
+    header button:disabled { opacity:.5; cursor:not-allowed; }
+    #map { height: calc(100vh - 52px); }
+    .toast {
+      position: fixed; left: 12px; right: 12px; bottom: 12px;
+      background: rgba(17,24,39,.95); color:#f9fafb;
+      padding: 10px 12px; border-radius: 12px;
+      font-size: 14px;
+    }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#374151; }
+  </style>
+</head>
+<body>
+<header>
+  <div style="font-weight:800;">Player</div>
+  <input id="name" placeholder="Your name" maxlength="24">
+  <button id="join">Join</button>
+</header>
+
+<div id="map"></div>
+<div class="toast" id="toast">Enter your name and press <span class="pill">Join</span>.</div>
+
+<script>
+  const elName = document.getElementById("name");
+  const btnJoin = document.getElementById("join");
+  const toast = document.getElementById("toast");
+
+  function setToast(html) { toast.innerHTML = html; }
+
+  // No place names
+  const map = L.map("map", { worldCopyJump: true }).setView([20, 0], 2);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png", {
+    maxZoom: 6,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
+  }).addTo(map);
+
+  const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+  const ws = new WebSocket(wsUrl);
+
+  let joined = false;
+  let locked = false; // locked after reveal
+  let roundState = null; // public round state
+  let myMarker = null;
+
+  btnJoin.disabled = true; // enable only after socket connects
+
+  ws.onopen = () => {
+    btnJoin.disabled = false;
+    setToast("Connected. Enter your name and press <span class='pill'>Join</span>.");
+  };
+
+  ws.onclose = () => {
+    btnJoin.disabled = true;
+    joined = false;
+    locked = false;
+    setToast("Disconnected from host.");
+  };
+
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+
+    if (msg.type === "registered") {
+      joined = true;
+      btnJoin.disabled = true;
+      elName.disabled = true;
+
+      roundState = msg.round;
+      locked = false;
+
+      if (!roundState) setToast("Joined. Waiting for the host to start a round…");
+      else setToast(`Joined. Round: <span class="pill">${escapeHtml(roundState.prompt || "Where is it?")}</span> — click the map to guess.`);
+    }
+
+    if (msg.type === "round_state") {
+      roundState = msg.round;
+      locked = false;
+
+      if (!joined) return;
+
+      if (!roundState) {
+        setToast("Waiting for the host to start a round…");
+      } else {
+        setToast(`Round: <span class="pill">${escapeHtml(roundState.prompt || "Where is it?")}</span> — click the map to guess.`);
+      }
+    }
+
+    if (msg.type === "guess_saved") {
+      setToast(`Guess saved: <span class="pill">${msg.lat.toFixed(2)}, ${msg.lng.toFixed(2)}</span>`);
+    }
+
+    if (msg.type === "reveal") {
+      locked = true;
+      showReveal(msg.round);
+    }
+  };
+
+  btnJoin.onclick = () => {
+    if (joined) return;
+    const name = (elName.value || "").trim().slice(0,24) || "Player";
+    ws.send(JSON.stringify({ type: "register", role: "client", name }));
+    setToast("Joining…");
+  };
+
+  map.on("click", (e) => {
+    if (!joined) return;
+    if (!roundState) return;
+    if (locked) return;
+
+    const { lat, lng } = e.latlng;
+
+    if (!myMarker) myMarker = L.marker([lat, lng]).addTo(map).bindPopup("Your guess");
+    else myMarker.setLatLng([lat, lng]);
+
+    ws.send(JSON.stringify({ type: "guess", lat, lng }));
+  });
+
+  // Reveal visuals
+  let actualMarker = null;
+  let guessMarkers = [];
+  let lines = [];
+
+  function clearReveal() {
+    if (actualMarker) { map.removeLayer(actualMarker); actualMarker = null; }
+    for (const m of guessMarkers) map.removeLayer(m);
+    guessMarkers = [];
+    for (const l of lines) map.removeLayer(l);
+    lines = [];
+  }
+
+  function showReveal(round) {
+    clearReveal();
+
+    const actual = round.actual;
+    actualMarker = L.circleMarker([actual.lat, actual.lng], { radius: 9 }).addTo(map).bindPopup("Actual");
+
+    const pts = [[actual.lat, actual.lng]];
+    for (const g of (round.guesses || [])) {
+      const m = L.marker([g.lat, g.lng]).addTo(map).bindPopup(`${escapeHtml(g.name)} (guess)`);
+      guessMarkers.push(m);
+
+      const line = L.polyline([[actual.lat, actual.lng], [g.lat, g.lng]], { weight: 3 }).addTo(map);
+      lines.push(line);
+
+      pts.push([g.lat, g.lng]);
+    }
+
+    map.fitBounds(L.latLngBounds(pts).pad(0.35));
+    setToast(`Reveal: <span class="pill">${escapeHtml(round.prompt || "Where is it?")}</span>`);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[c]));
+  }
+</script>
+</body>
+</html>

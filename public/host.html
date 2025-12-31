@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Host Display</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#000; }
+    #map { height:100vh; }
+    .hud {
+      position: fixed; left: 16px; right: 16px; top: 16px;
+      display:flex; justify-content:space-between; gap:12px;
+      pointer-events:none;
+    }
+    .panel {
+      background: rgba(17,24,39,.85); color:#f9fafb;
+      padding: 12px 14px; border-radius: 14px;
+      backdrop-filter: blur(6px);
+      max-width: 70vw;
+    }
+    .title { font-size: 30px; font-weight: 900; line-height: 1.05; }
+    .muted { color:#d1d5db; font-size: 15px; margin-top: 6px; }
+    .count { font-size: 22px; font-weight: 800; text-align:right; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="hud">
+    <div class="panel">
+      <div class="title" id="prompt">Waiting for round…</div>
+      <div class="muted" id="sub">Admin: /admin.html</div>
+    </div>
+    <div class="panel" style="text-align:right; min-width: 160px;">
+      <div class="muted">Guesses</div>
+      <div class="count" id="guessCount">0</div>
+    </div>
+  </div>
+
+<script>
+  const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+  const ws = new WebSocket(wsUrl);
+
+  const elPrompt = document.getElementById("prompt");
+  const elSub = document.getElementById("sub");
+  const elGuessCount = document.getElementById("guessCount");
+
+  // No place names
+  const map = L.map("map", { worldCopyJump: true, zoomControl: false }).setView([20, 0], 2);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png", {
+    maxZoom: 6,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
+  }).addTo(map);
+
+  let actualMarker = null;
+  let guessMarkers = [];
+  let lines = [];
+
+  function clearReveal() {
+    if (actualMarker) { map.removeLayer(actualMarker); actualMarker = null; }
+    for (const m of guessMarkers) map.removeLayer(m);
+    guessMarkers = [];
+    for (const l of lines) map.removeLayer(l);
+    lines = [];
+  }
+
+  function renderPublic(round) {
+    clearReveal(); // host stays clean until reveal
+
+    if (!round) {
+      elPrompt.textContent = "Waiting for round…";
+      elSub.textContent = "Admin: /admin.html";
+      elGuessCount.textContent = "0";
+      return;
+    }
+
+    elPrompt.textContent = round.prompt || "Where is it?";
+    elSub.textContent = round.revealed ? "Revealed" : "Waiting for reveal…";
+    elGuessCount.textContent = String(round.guessCount ?? 0);
+  }
+
+  function showReveal(round) {
+    // round contains actual + guesses
+    clearReveal();
+
+    elPrompt.textContent = round.prompt || "Where is it?";
+    elSub.textContent = "Reveal!";
+    elGuessCount.textContent = String(round.guesses?.length ?? 0);
+
+    const actual = round.actual;
+    actualMarker = L.circleMarker([actual.lat, actual.lng], { radius: 10 }).addTo(map);
+
+    const pts = [[actual.lat, actual.lng]];
+    for (const g of (round.guesses || [])) {
+      const m = L.marker([g.lat, g.lng]).addTo(map);
+      guessMarkers.push(m);
+
+      const line = L.polyline([[actual.lat, actual.lng], [g.lat, g.lng]], { weight: 4 }).addTo(map);
+      lines.push(line);
+
+      pts.push([g.lat, g.lng]);
+    }
+
+    if (pts.length > 1) map.fitBounds(L.latLngBounds(pts).pad(0.35));
+  }
+
+  ws.onopen = () => ws.send(JSON.stringify({ type: "register", role: "host" }));
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "round_state") renderPublic(msg.round);
+    if (msg.type === "reveal") showReveal(msg.round);
+  };
+</script>
+</body>
+</html>

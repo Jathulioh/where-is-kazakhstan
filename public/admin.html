@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Admin</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header {
+      padding: 10px 12px;
+      background:#111827; color:#f9fafb;
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    }
+    header input {
+      flex: 1; min-width: 260px;
+      padding: 8px 10px; border-radius: 10px;
+      border: 1px solid #374151; background:#0b1220; color:#f9fafb;
+    }
+    header button {
+      padding: 8px 12px; border-radius: 10px;
+      border: 1px solid #374151; background:#1f2937; color:#f9fafb;
+      cursor:pointer;
+    }
+    header button:disabled { opacity:.5; cursor:not-allowed; }
+    main { display:grid; grid-template-columns: 1fr 360px; height: calc(100vh - 52px); }
+    #map { height:100%; }
+    aside { border-left: 1px solid #e5e7eb; padding: 12px; overflow:auto; background:#fafafa; }
+    .card { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:10px; margin-bottom:10px; }
+    .big { font-size: 18px; font-weight: 700; }
+    .muted { color:#6b7280; font-size:13px; margin-top:6px; }
+    .pill { display:inline-block; padding:4px 8px; border-radius:999px; background:#f3f4f6; font-size: 13px; margin: 4px 6px 0 0; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+<body>
+<header>
+  <div style="font-weight:800;">Admin</div>
+  <input id="prompt" placeholder="Prompt (e.g. Where is Kazakhstan?)">
+  <button id="start">Start round</button>
+  <button id="reveal" disabled>Reveal</button>
+  <button id="clear">Clear</button>
+</header>
+
+<main>
+  <div id="map"></div>
+  <aside>
+    <div class="card">
+      <div class="big" id="status">Connecting…</div>
+      <div class="muted">Click the map to set the actual location (only after starting a round).</div>
+      <div class="muted">Projector: <span class="pill mono" id="hostUrl"></span></div>
+      <div class="muted">Players: <span class="pill mono" id="clientUrl"></span></div>
+    </div>
+
+    <div class="card">
+      <div class="big">Round</div>
+      <div class="muted" id="roundInfo">No round running.</div>
+    </div>
+
+    <div class="card">
+      <div class="big">Players</div>
+      <div class="muted" id="players">None</div>
+    </div>
+
+    <div class="card">
+      <div class="big">Guesses (admin preview)</div>
+      <div class="muted" id="guesses">No guesses yet.</div>
+    </div>
+  </aside>
+</main>
+
+<script>
+  const hostUrl = document.getElementById("hostUrl");
+  const clientUrl = document.getElementById("clientUrl");
+  hostUrl.textContent = location.origin + "/host.html";
+  clientUrl.textContent = location.origin + "/client.html";
+
+  const elStatus = document.getElementById("status");
+  const elPrompt = document.getElementById("prompt");
+  const btnStart = document.getElementById("start");
+  const btnReveal = document.getElementById("reveal");
+  const btnClear = document.getElementById("clear");
+
+  const elRoundInfo = document.getElementById("roundInfo");
+  const elPlayers = document.getElementById("players");
+  const elGuesses = document.getElementById("guesses");
+
+  const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+  const ws = new WebSocket(wsUrl);
+
+  // No place names
+  const map = L.map("map", { worldCopyJump: true }).setView([20, 0], 2);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png", {
+    maxZoom: 6,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
+  }).addTo(map);
+
+  let currentRound = null; // full round snapshot
+  let actualMarker = null;
+  const guessMarkers = new Map();
+
+  function clearVisuals() {
+    if (actualMarker) { map.removeLayer(actualMarker); actualMarker = null; }
+    for (const m of guessMarkers.values()) map.removeLayer(m);
+    guessMarkers.clear();
+  }
+
+  function renderPlayers(clients) {
+    if (!clients || clients.length === 0) { elPlayers.textContent = "None"; return; }
+    elPlayers.innerHTML = clients.map(c => `<span class="pill">${escapeHtml(c.name)}</span>`).join(" ");
+  }
+
+  function renderRound(round) {
+    currentRound = round;
+    clearVisuals();
+
+    if (!round) {
+      elRoundInfo.textContent = "No round running.";
+      elGuesses.textContent = "No guesses yet.";
+      btnReveal.disabled = true;
+      return;
+    }
+
+    elRoundInfo.innerHTML = `
+      <div><span class="pill">${escapeHtml(round.prompt || "Where is it?")}</span></div>
+      <div class="muted">Actual set: <b>${round.actual ? "Yes" : "No"}</b> · Guesses: <b>${(round.guesses || []).length}</b></div>
+    `;
+
+    if (round.actual) {
+      actualMarker = L.circleMarker([round.actual.lat, round.actual.lng], { radius: 9 }).addTo(map);
+      actualMarker.bindPopup("Actual");
+    }
+
+    // Show guess pins to admin (not to host display)
+    for (const g of (round.guesses || [])) {
+      const m = L.marker([g.lat, g.lng]).addTo(map);
+      m.bindPopup(`${escapeHtml(g.name)} (guess)`);
+      guessMarkers.set(g.clientId, m);
+    }
+
+    if (!round.guesses || round.guesses.length === 0) elGuesses.textContent = "No guesses yet.";
+    else elGuesses.innerHTML = round.guesses
+      .slice()
+      .sort((a,b) => a.ts - b.ts)
+      .map(g => `<div><span class="pill">${escapeHtml(g.name)}</span><span class="muted">${g.lat.toFixed(2)}, ${g.lng.toFixed(2)}</span></div>`)
+      .join("");
+
+    btnReveal.disabled = !round.actual || (round.guesses?.length ?? 0) === 0;
+  }
+
+  map.on("click", (e) => {
+    // This is the “admin can't select an area” fix:
+    // - we only send if a round exists
+    // - Leaflet map fills its container, no overlay blocks it
+    if (!currentRound) return;
+    ws.send(JSON.stringify({ type: "set_actual", lat: e.latlng.lat, lng: e.latlng.lng }));
+  });
+
+  btnStart.onclick = () => ws.send(JSON.stringify({ type: "start_round", prompt: elPrompt.value }));
+  btnReveal.onclick = () => ws.send(JSON.stringify({ type: "reveal" }));
+  btnClear.onclick = () => ws.send(JSON.stringify({ type: "clear_round" }));
+
+  ws.onopen = () => {
+    elStatus.textContent = "Connected";
+    ws.send(JSON.stringify({ type: "register", role: "admin" }));
+  };
+
+  ws.onclose = () => elStatus.textContent = "Disconnected";
+
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+
+    if (msg.type === "admin_state") {
+      renderPlayers(msg.clients);
+      renderRound(msg.round);
+    }
+    if (msg.type === "clients_list") renderPlayers(msg.clients);
+    if (msg.type === "round_state_admin") renderRound(msg.round);
+  };
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[c]));
+  }
+</script>
+</body>
+</html>
